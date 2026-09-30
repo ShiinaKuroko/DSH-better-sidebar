@@ -25,12 +25,21 @@ const { gitStatus } = vi.hoisted(() => ({ gitStatus: vi.fn() }))
 
 vi.mock('../src/client/api.ts', () => ({
   api: {
+    // One listing per requested level, so only the asserted rows exist.
     fsTrees: async (_scope: unknown, paths: readonly string[]) => ({
-      levels: paths.map(path => ({ path, entries: [
-        { name: 'sub', path: '/tmp/sub', isDir: true },
-        { name: 'a.ts', path: '/tmp/a.ts', isDir: false },
-        { name: 'b.ts', path: '/tmp/b.ts', isDir: false },
-      ], truncated: false })),
+      levels: paths.map(path => ({
+        path,
+        entries: path === '/tmp'
+          ? [
+            { name: 'sub', path: '/tmp/sub', isDir: true },
+            { name: 'a.ts', path: '/tmp/a.ts', isDir: false },
+            { name: 'b.ts', path: '/tmp/b.ts', isDir: false },
+          ]
+          : path === '/tmp/sub'
+            ? [{ name: 'inner.ts', path: '/tmp/sub/inner.ts', isDir: false }]
+            : [],
+        truncated: false,
+      })),
     }),
     gitStatus,
   },
@@ -54,7 +63,7 @@ interface Harness {
   unmount: () => void
 }
 
-async function mountTree(): Promise<Harness> {
+async function mountTree(expanded: string[] = []): Promise<Harness> {
   const container = document.createElement('div')
   document.body.append(container)
   const root: Root = createRoot(container)
@@ -62,7 +71,7 @@ async function mountTree(): Promise<Harness> {
     root.render(createElement(FileTree, {
       sessionId: 'git-spec',
       cwd: '/tmp',
-      expanded: [],
+      expanded,
       revealed: [],
       onToggle: () => {},
       onOpenFile: () => {},
@@ -137,5 +146,24 @@ describe('FileTree git ink', () => {
     expect(nameSpan(file).className).not.toContain('explorerGitName')
     const dir = rowByName(harness.container, 'sub')
     expect(nameSpan(dir).className).not.toContain('explorerDirChanged')
+  })
+
+  it("tints a nested repository's rows with that repository's own root", async () => {
+    // git reports every status path relative to ITS repository, so a nested
+    // group must join onto the group root: a workspace holding independent
+    // checkouts (a coordination project whose children are separate repos)
+    // otherwise colors nothing at all below the child.
+    gitStatus.mockResolvedValue({
+      isRepo: true,
+      root: '/tmp',
+      entries: [],
+      nested: [{ root: '/tmp/sub', entries: [{ path: 'inner.ts', xy: ' M' }] }],
+    })
+    harness = await mountTree(['/tmp/sub'])
+    const dir = rowByName(harness.container, 'sub')
+    expect(nameSpan(dir).className).toContain('explorerDirChanged')
+    const row = rowByName(harness.container, 'inner.ts')
+    expect(nameSpan(row).getAttribute('data-git-tone')).toBe('modified')
+    expect(row.querySelector<HTMLElement>('[class*="statusBadge"]')?.textContent).toBe('M')
   })
 })

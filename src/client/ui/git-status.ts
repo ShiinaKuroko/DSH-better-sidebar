@@ -21,7 +21,7 @@
  * returned early, so a click during the poll silently did nothing).
  */
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
-import { api, type GitStatusResult } from '../api.ts'
+import { api, type GitStatusEntry, type GitStatusResult } from '../api.ts'
 
 /** The semantic class of one changed path (drives the row's ink). */
 export type GitTone =
@@ -95,16 +95,26 @@ function joinRoot(root: string, rel: string): string {
  * field (never by serializing the whole object): the entries are the payload
  * and their order is stable, so a length + pairwise compare is enough.
  */
+function sameEntries(a: GitStatusEntry[], b: GitStatusEntry[]): boolean {
+  return a.length === b.length && a.every((entry, index) => {
+    const other = b[index]!
+    return entry.path === other.path && entry.xy === other.xy
+  })
+}
+
 function sameStatus(a: GitStatusResult, b: GitStatusResult): boolean {
   if (a === b) return true
   if (a.isRepo !== b.isRepo || a.branch !== b.branch || a.root !== b.root
-    || a.truncated !== b.truncated || a.entries.length !== b.entries.length) return false
+    || a.truncated !== b.truncated) return false
   if (a.repositories?.length !== b.repositories?.length) return false
   if (a.repositories !== undefined && b.repositories !== undefined
     && a.repositories.some((root, index) => root !== b.repositories![index])) return false
-  return a.entries.every((entry, index) => {
-    const other = b.entries[index]!
-    return entry.path === other.path && entry.xy === other.xy
+  if (!sameEntries(a.entries, b.entries)) return false
+  const aNested = a.nested ?? []
+  const bNested = b.nested ?? []
+  return aNested.length === bNested.length && aNested.every((group, index) => {
+    const other = bNested[index]!
+    return group.root === other.root && sameEntries(group.entries, other.entries)
   })
 }
 
@@ -121,7 +131,21 @@ function buildIndex(snapshot: GitStatusResult): Index {
   const dirs = new Set<string>()
   const root = snapshot.root
   if (!snapshot.isRepo || root === undefined) return { files, dirs }
-  for (const entry of snapshot.entries) {
+  addEntries(root, snapshot.entries, files, dirs)
+  // Nested checkouts under the cwd are colored too. Each group carries its own
+  // root, because git reports every path relative to ITS repository.
+  for (const group of snapshot.nested ?? []) addEntries(group.root, group.entries, files, dirs)
+  return { files, dirs }
+}
+
+/** Index one repository's rows, plus the directories that dominate them. */
+function addEntries(
+  root: string,
+  entries: GitStatusEntry[],
+  files: Map<string, GitFileStatus>,
+  dirs: Set<string>,
+): void {
+  for (const entry of entries) {
     const status = statusOfXY(entry.xy)
     if (status === undefined) continue
     const absolute = normPath(joinRoot(root, entry.path))
@@ -134,7 +158,6 @@ function buildIndex(snapshot: GitStatusResult): Index {
       at = dir.lastIndexOf('/')
     }
   }
-  return { files, dirs }
 }
 
 interface Slot {

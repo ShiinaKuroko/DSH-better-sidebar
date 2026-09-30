@@ -64,6 +64,15 @@ export interface GitStatusResult {
   truncated?: boolean
   root?: string
   repositories?: string[]
+  /** The repositories nested under the session cwd; the file tree colors them
+   *  alongside the selected repository. */
+  nested?: GitRepoStatus[]
+}
+
+/** Git status of one repository nested under the session cwd. */
+export interface GitRepoStatus {
+  root: string
+  entries: GitStatusEntry[]
 }
 
 /** One linked Git checkout. */

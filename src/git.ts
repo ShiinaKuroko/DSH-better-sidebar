@@ -9,7 +9,7 @@
  * Commits use the user's git global identity untouched (never sets
  * user.name/user.email).
  */
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
@@ -33,6 +33,18 @@ export interface GitStatusResult {
   /** Selected repository root, or the discovered roots when the cwd is a container. */
   root?: string
   repositories?: string[]
+  /** The repositories nested under the session cwd (their own checkouts, not
+   *  linked worktrees); the file tree colors them alongside the selected one. */
+  nested?: GitRepoStatus[]
+}
+
+/** One nested repository under the session cwd. Only DIRECT children are
+ *  discovered: the tree's root IS the cwd, so nothing deeper is listed at the
+ *  level the tree renders. */
+export interface GitRepoStatus {
+  /** Absolute checkout root. */
+  root: string
+  entries: GitStatusEntry[]
 }
 
 /** One linked checkout returned by `git worktree list --porcelain`. */
@@ -307,6 +319,7 @@ export async function status(cwd: string, selected?: string): Promise<GitStatusR
   ])
   const parsed = parsePorcelainZ(raw)
   const truncated = parsed.length > GIT_STATUS_LIMIT
+  const nested = await nestedStatuses(cwd, root, repositories)
   return {
     isRepo: true,
     branch,
@@ -314,7 +327,51 @@ export async function status(cwd: string, selected?: string): Promise<GitStatusR
     truncated,
     root,
     repositories,
+    nested,
   }
+}
+
+/** Nested checkouts scanned per snapshot. Each one costs a `git status` spawn on
+ *  every poll (~50 ms on a healthy checkout), so the fan-out stays small. */
+const NESTED_REPO_LIMIT = 8
+
+/** Direct child directories of `cwd` that are their own repository root, found
+ *  by a `.git` entry (file or directory) — no git probe, so a directory full of
+ *  ordinary folders costs one readdir and a few stats.
+ *  ponytail: direct children only; recursing would reintroduce the #369
+ *  probe fan-out. Upgrade path: walk one level where a directory holds repos. */
+async function childRepoRoots(cwd: string): Promise<string[]> {
+  const entries = await readdir(cwd, { withFileTypes: true }).catch(() => [])
+  const roots: string[] = []
+  for (const entry of entries
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+    .sort((left, right) => left.name.localeCompare(right.name))) {
+    if (roots.length >= NESTED_REPO_LIMIT) break
+    const child = join(cwd, entry.name)
+    if (await stat(join(child, '.git')).then(() => true, () => false)) roots.push(child)
+  }
+  return roots
+}
+
+/** Status of the sibling repositories sitting under the session cwd: the other
+ *  roots of a workspace container, else the direct child checkouts of the
+ *  containing repository. The file tree colors every one of them; the
+ *  source-control panel still lists the selected repository alone. */
+async function nestedStatuses(cwd: string, root: string, repositories: string[]): Promise<GitRepoStatus[]> {
+  const candidates = repositories.length > 1 ? repositories : await childRepoRoots(cwd)
+  const others = candidates
+    .filter(candidate => pathIdentity(candidate) !== pathIdentity(root))
+    .slice(0, NESTED_REPO_LIMIT)
+  const results = await Promise.all(others.map(async (repoRoot): Promise<GitRepoStatus | undefined> => {
+    try {
+      const raw = await runGit(repoRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+      return { root: repoRoot, entries: parsePorcelainZ(raw) }
+    } catch {
+      // A nested checkout git refuses is simply not colored.
+      return undefined
+    }
+  }))
+  return results.filter((result): result is GitRepoStatus => result !== undefined)
 }
 
 /** Platform-aware identity used only for comparing absolute checkout roots. */

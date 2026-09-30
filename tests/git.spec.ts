@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -38,6 +38,36 @@ describe('git parsing', () => {
       })
     } finally {
       await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('reports nested checkouts inside a repository as their own status groups', async () => {
+    // A repository that CONTAINS independent checkouts (a coordination project
+    // whose children are separate repos) must surface their changes: `git
+    // status` in the container never lists an ignored nested checkout, so the
+    // host adds one group per direct child repository and roots it there.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-git-nested-'))
+    const child = join(root, 'child')
+    try {
+      await execFileAsync('git', ['-C', root, 'init'])
+      await execFileAsync('git', ['-C', root, 'config', 'user.email', 't@t'])
+      await execFileAsync('git', ['-C', root, 'config', 'user.name', 't'])
+      await writeFile(join(root, '.gitignore'), 'child/\n')
+      await execFileAsync('git', ['-C', root, 'add', '.gitignore'])
+      await execFileAsync('git', ['-C', root, 'commit', '-q', '-m', 'init'])
+
+      await mkdir(child)
+      await execFileAsync('git', ['-C', child, 'init'])
+      await writeFile(join(child, 'a.ts'), 'x')
+
+      const result = await status(root)
+      // The container itself is clean, so its own rows stay empty while the
+      // nested checkout arrives as a group rooted at the child.
+      expect(result.entries).toEqual([])
+      expect(result.nested?.map(group => group.root)).toEqual([child])
+      expect(result.nested?.[0]?.entries).toEqual([{ path: 'a.ts', xy: '??' }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 
