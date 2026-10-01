@@ -71,6 +71,42 @@ describe('git parsing', () => {
     }
   })
 
+  it('colors a linked worktree and its commits relative to the main branch', async () => {
+    // A task worktree lives INSIDE its repository (the project convention is a
+    // hidden, ignored .worktrees/<task>), so only `git worktree list` finds it.
+    // Its work is normally committed, so the working-tree rows are empty and
+    // the branch diff is what keeps the checkout readable.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-git-worktree-'))
+    const worktree = join(root, '.worktrees', 'task')
+    try {
+      await execFileAsync('git', ['-C', root, 'init'])
+      await execFileAsync('git', ['-C', root, 'config', 'user.email', 't@t'])
+      await execFileAsync('git', ['-C', root, 'config', 'user.name', 't'])
+      await writeFile(join(root, '.gitignore'), '.worktrees/\n')
+      await writeFile(join(root, 'a.ts'), 'x')
+      await execFileAsync('git', ['-C', root, 'add', '.'])
+      await execFileAsync('git', ['-C', root, 'commit', '-q', '-m', 'init'])
+
+      await mkdir(join(root, '.worktrees'))
+      await execFileAsync('git', ['-C', root, 'worktree', 'add', '-b', 'task', worktree])
+      await writeFile(join(worktree, 'feature.ts'), 'y')
+      await execFileAsync('git', ['-C', worktree, 'add', 'feature.ts'])
+      await execFileAsync('git', ['-C', worktree, 'commit', '-q', '-m', 'work'])
+
+      const result = await status(root)
+      // git reports the canonical checkout path (realpath-expanded), which the
+      // raw mkdtemp path may alias on macOS and on Windows 8.3 TEMP names.
+      const group = result.nested?.find(entry => canonical(entry.root) === canonical(worktree))
+      expect(group).toBeDefined()
+      expect(group?.entries).toEqual([])
+      expect(group?.branchChanged).toEqual(['feature.ts'])
+      // The main checkout sits on the base branch, so it has no branch diff.
+      expect(result.branchChanged).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('parses porcelain -z entries including renames', () => {
     const output = ['M  src/a.ts', ' M src/b.ts', '?? src/c.ts', 'R  src/new.ts', 'src/old.ts', ''].join('\0')
     const entries = parsePorcelainZ(output)

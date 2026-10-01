@@ -33,18 +33,23 @@ export interface GitStatusResult {
   /** Selected repository root, or the discovered roots when the cwd is a container. */
   root?: string
   repositories?: string[]
-  /** The repositories nested under the session cwd (their own checkouts, not
-   *  linked worktrees); the file tree colors them alongside the selected one. */
+  /** The repositories nested under the session cwd, linked worktrees included;
+   *  the file tree colors them alongside the selected one. */
   nested?: GitRepoStatus[]
+  /** Files this checkout differs on relative to its repository's main branch —
+   *  its own commits included. The tree draws them like a modification, so a
+   *  clean task worktree still shows where the work is. */
+  branchChanged?: string[]
 }
 
-/** One nested repository under the session cwd. Only DIRECT children are
- *  discovered: the tree's root IS the cwd, so nothing deeper is listed at the
- *  level the tree renders. */
+/** One checkout colored alongside the selected repository: a direct child
+ *  repository, or a linked worktree of one. */
 export interface GitRepoStatus {
   /** Absolute checkout root. */
   root: string
   entries: GitStatusEntry[]
+  /** {@link GitStatusResult.branchChanged} for this checkout. */
+  branchChanged?: string[]
 }
 
 /** One linked checkout returned by `git worktree list --porcelain`. */
@@ -320,6 +325,7 @@ export async function status(cwd: string, selected?: string): Promise<GitStatusR
   const parsed = parsePorcelainZ(raw)
   const truncated = parsed.length > GIT_STATUS_LIMIT
   const nested = await nestedStatuses(cwd, root, repositories)
+  const branchChanged = await branchChangedPaths(root, await baseBranch(root))
   return {
     isRepo: true,
     branch,
@@ -328,6 +334,7 @@ export async function status(cwd: string, selected?: string): Promise<GitStatusR
     root,
     repositories,
     nested,
+    branchChanged,
   }
 }
 
@@ -358,20 +365,72 @@ async function childRepoRoots(cwd: string): Promise<string[]> {
  *  containing repository. The file tree colors every one of them; the
  *  source-control panel still lists the selected repository alone. */
 async function nestedStatuses(cwd: string, root: string, repositories: string[]): Promise<GitRepoStatus[]> {
-  const candidates = repositories.length > 1 ? repositories : await childRepoRoots(cwd)
-  const others = candidates
+  const siblings = (repositories.length > 1 ? repositories : await childRepoRoots(cwd))
     .filter(candidate => pathIdentity(candidate) !== pathIdentity(root))
     .slice(0, NESTED_REPO_LIMIT)
-  const results = await Promise.all(others.map(async (repoRoot): Promise<GitRepoStatus | undefined> => {
+  // Every repository the tree covers, plus its linked worktrees: a task worktree
+  // lives INSIDE its repository (usually under a hidden, ignored .worktrees/),
+  // so nothing but `git worktree list` can find it.
+  const roots: string[] = []
+  for (const repo of [root, ...siblings]) {
+    if (pathIdentity(repo) !== pathIdentity(root)) roots.push(repo)
+    for (const worktree of await linkedWorktrees(repo)) {
+      if (roots.length >= NESTED_REPO_LIMIT) break
+      if (pathIdentity(worktree) === pathIdentity(root)) continue
+      if (roots.some(existing => pathIdentity(existing) === pathIdentity(worktree))) continue
+      roots.push(worktree)
+    }
+    if (roots.length >= NESTED_REPO_LIMIT) break
+  }
+  const results = await Promise.all(roots.slice(0, NESTED_REPO_LIMIT).map(async (repoRoot): Promise<GitRepoStatus | undefined> => {
     try {
       const raw = await runGit(repoRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-      return { root: repoRoot, entries: parsePorcelainZ(raw) }
+      const changed = await branchChangedPaths(repoRoot, await baseBranch(repoRoot))
+      return { root: repoRoot, entries: parsePorcelainZ(raw), branchChanged: changed }
     } catch {
       // A nested checkout git refuses is simply not colored.
       return undefined
     }
   }))
   return results.filter((result): result is GitRepoStatus => result !== undefined)
+}
+
+/** Usable linked checkouts of the repository containing `cwd`, main checkout
+ *  excluded — callers already hold that one. */
+async function linkedWorktrees(cwd: string): Promise<string[]> {
+  const listed = await listedWorktrees(cwd).catch(() => [])
+  return listed.slice(1).map(entry => entry.path)
+}
+
+/** The branch the repository's MAIN checkout has out, which is what every
+ *  checkout of that repository is measured against. `undefined` when detached. */
+async function baseBranch(cwd: string): Promise<string | undefined> {
+  const listed = await listedWorktrees(cwd).catch(() => [])
+  const branch = listed[0]?.branch
+  return branch === undefined || branch === 'HEAD' ? undefined : branch
+}
+
+/** `git diff` per HEAD is stable until HEAD moves while the panel polls every
+ *  2.5 s, so the answer is memoized per (checkout, base, head). */
+const branchChangedCache = new Map<string, string[]>()
+
+/** Files one checkout differs on relative to `base` — its own commits
+ *  included. Empty when there is nothing to compare (no base, unrelated
+ *  history, or a checkout sitting on the base itself). */
+async function branchChangedPaths(root: string, base: string | undefined): Promise<string[]> {
+  if (base === undefined) return []
+  const head = (await runGit(root, ['rev-parse', 'HEAD']).catch(() => '')).trim()
+  if (head === '') return []
+  const key = `${pathIdentity(root)}\u0000${base}\u0000${head}`
+  const cached = branchChangedCache.get(key)
+  if (cached !== undefined) return cached
+  const paths = await (async () => {
+    const mergeBase = (await runGit(root, ['merge-base', head, base])).trim()
+    const raw = await runGit(root, ['diff', '--name-only', '-z', mergeBase, head])
+    return raw.split('\0').filter(path => path !== '')
+  })().catch(() => [] as string[])
+  branchChangedCache.set(key, paths)
+  return paths
 }
 
 /** Platform-aware identity used only for comparing absolute checkout roots. */

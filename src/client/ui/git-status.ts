@@ -110,12 +110,21 @@ function sameStatus(a: GitStatusResult, b: GitStatusResult): boolean {
   if (a.repositories !== undefined && b.repositories !== undefined
     && a.repositories.some((root, index) => root !== b.repositories![index])) return false
   if (!sameEntries(a.entries, b.entries)) return false
+  if (!samePaths(a.branchChanged, b.branchChanged)) return false
   const aNested = a.nested ?? []
   const bNested = b.nested ?? []
   return aNested.length === bNested.length && aNested.every((group, index) => {
     const other = bNested[index]!
     return group.root === other.root && sameEntries(group.entries, other.entries)
+      && samePaths(group.branchChanged, other.branchChanged)
   })
+}
+
+/** Whether two path lists are the same (order is stable). */
+function samePaths(a: string[] | undefined, b: string[] | undefined): boolean {
+  const left = a ?? []
+  const right = b ?? []
+  return left.length === right.length && left.every((path, index) => path === right[index])
 }
 
 interface Index {
@@ -132,10 +141,27 @@ function buildIndex(snapshot: GitStatusResult): Index {
   const root = snapshot.root
   if (!snapshot.isRepo || root === undefined) return { files, dirs }
   addEntries(root, snapshot.entries, files, dirs)
-  // Nested checkouts under the cwd are colored too. Each group carries its own
-  // root, because git reports every path relative to ITS repository.
-  for (const group of snapshot.nested ?? []) addEntries(group.root, group.entries, files, dirs)
+  addChanged(root, snapshot.branchChanged, files, dirs)
+  // Nested checkouts (linked worktrees included) are colored too. Each group
+  // carries its own root, because git reports every path relative to ITS
+  // repository.
+  for (const group of snapshot.nested ?? []) {
+    addEntries(group.root, group.entries, files, dirs)
+    addChanged(group.root, group.branchChanged, files, dirs)
+  }
   return { files, dirs }
+}
+
+/** Draw this checkout's branch diff in the modified ink. A live working-tree
+ *  status always wins, so a dirty file keeps its own letter. */
+function addChanged(
+  root: string,
+  paths: string[] | undefined,
+  files: Map<string, GitFileStatus>,
+  dirs: Set<string>,
+): void {
+  if (paths === undefined || paths.length === 0) return
+  addEntries(root, paths.map(path => ({ path, xy: ' M' })), files, dirs, true)
 }
 
 /** Index one repository's rows, plus the directories that dominate them. */
@@ -144,11 +170,13 @@ function addEntries(
   entries: GitStatusEntry[],
   files: Map<string, GitFileStatus>,
   dirs: Set<string>,
+  onlyMissing = false,
 ): void {
   for (const entry of entries) {
     const status = statusOfXY(entry.xy)
     if (status === undefined) continue
     const absolute = normPath(joinRoot(root, entry.path))
+    if (onlyMissing && files.has(absolute)) continue
     files.set(absolute, status)
     let at = absolute.lastIndexOf('/')
     while (at > 0) {

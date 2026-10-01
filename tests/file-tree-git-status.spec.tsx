@@ -166,4 +166,19 @@ describe('FileTree git ink', () => {
     expect(nameSpan(row).getAttribute('data-git-tone')).toBe('modified')
     expect(row.querySelector<HTMLElement>('[class*="statusBadge"]')?.textContent).toBe('M')
   })
+
+  it('tints a committed branch diff in an otherwise clean nested checkout', async () => {
+    // A task worktree is usually committed clean, so its working-tree rows are
+    // empty; the branch diff is what makes the checkout visible at all.
+    gitStatus.mockResolvedValue({
+      isRepo: true,
+      root: '/tmp',
+      entries: [],
+      nested: [{ root: '/tmp/sub', entries: [], branchChanged: ['inner.ts'] }],
+    })
+    harness = await mountTree(['/tmp/sub'])
+    const row = rowByName(harness.container, 'inner.ts')
+    expect(nameSpan(row).getAttribute('data-git-tone')).toBe('modified')
+    expect(row.querySelector<HTMLElement>('[class*="statusBadge"]')?.textContent).toBe('M')
+  })
 })

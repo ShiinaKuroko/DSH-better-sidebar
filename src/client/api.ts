@@ -67,12 +67,18 @@ export interface GitStatusResult {
   /** The repositories nested under the session cwd; the file tree colors them
    *  alongside the selected repository. */
   nested?: GitRepoStatus[]
+  /** Files that differ from the repository's main branch (commits included):
+   *  the tree draws them like a modification, so a clean worktree still shows
+   *  where the work is. */
+  branchChanged?: string[]
 }
 
 /** Git status of one repository nested under the session cwd. */
 export interface GitRepoStatus {
   root: string
   entries: GitStatusEntry[]
+  /** {@link GitStatusResult.branchChanged} for this checkout. */
+  branchChanged?: string[]
 }
 
 /** One linked Git checkout. */
